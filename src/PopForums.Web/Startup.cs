@@ -13,11 +13,28 @@ using PopForums.Mvc.Areas.Forums.Authorization;
 using PopForums.Mvc.Areas.Forums.Extensions;
 using PopForums.Sql;
 using PopForums.Mvc.Areas.Forums.Services;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using System.Net.Http;
+using System;
+using Microsoft.AspNetCore.Authentication;
+using IdentityModel.Client;
+using System.Security.Claims;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using IdentityServer4;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Rewrite;
+using System.Threading.Tasks;
 
 namespace PopForums.Web
 {
 	public class Startup
 	{
+		public const string ClientId = "PopForums";
+		public const string ClientSecret = "secret";
+		public const string AuthorityAddress = "http://localhost:5000";
+
 		public Startup(IWebHostEnvironment env)
 		{
 			// Setup configuration sources.
@@ -55,6 +72,9 @@ namespace PopForums.Web
 			// this adds dependencies from the MVC project (and base dependencies) and sets up authentication for the forum
 			services.AddPopForumsMvc();
 
+			// Set up IdentityServer
+			AddIdentityServer(services);
+
 			// Add the service to auto provision accounts from external logins when ExternalLoginOnly is enabled
 			services.AddTransient<IAutoProvisionAccountService, AutoProvisionAccountService>();
 
@@ -75,15 +95,61 @@ namespace PopForums.Web
 
 			// use Azure Functions queues for POP Forums using AzureKit for background tasks...
 			// do NOT call AddPopForumsBackgroundServices()
-			services.AddPopForumsAzureFunctionsAndQueues();
+			//services.AddPopForumsAzureFunctionsAndQueues();
 
 			// creates an instance of the background services for POP Forums... call this last in forum setup,
 			// but don't use if you're running these in functions
-			//services.AddPopForumsBackgroundServices();
+			services.AddPopForumsBackgroundServices();
+		}
+
+		private static void AddIdentityServer(IServiceCollection services)
+		{
+			services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
+				.AddCookie(IdentityServerConstants.ExternalCookieAuthenticationScheme, options =>
+				{
+					options.ExpireTimeSpan = TimeSpan.FromMinutes(5);
+				})
+				.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, options =>
+				{
+					options.Authority = AuthorityAddress;
+					options.RequireHttpsMetadata = false;
+
+					options.ClientId = ClientId;
+					options.ClientSecret = ClientSecret;
+					options.ResponseType = OpenIdConnectResponseType.CodeIdToken;
+
+					options.UsePkce = false;
+
+					options.Scope.Add(OpenIdConnectScope.OfflineAccess);
+					options.Scope.Add(OpenIdConnectScope.OpenIdProfile);
+					options.Scope.Add(OpenIdConnectScope.Email);
+
+					options.SaveTokens = true;
+
+					options.SignInScheme = IdentityServerConstants.ExternalCookieAuthenticationScheme;
+
+					options.Events = new OpenIdConnectEvents
+					{
+						OnRedirectToIdentityProviderForSignOut = async c =>
+						{
+							var idToken = c.Properties?.GetTokenValue("id_token");
+
+							if (idToken != null)
+								c.ProtocolMessage.IdTokenHint = idToken;
+						},
+					};
+				});
 		}
 
 		public void Configure(IApplicationBuilder app, ILoggerFactory loggerFactory)
 		{
+			// Redirect the forum login and logout actions
+			var rewriteOptions = new RewriteOptions()
+				.AddRedirect("Forums/Account/Login", "/Account/Login")
+				.AddRedirect("Forums/Identity/Logout", "/Account/Logout");
+
+			app.UseRewriter(rewriteOptions);
+
 			// Records exceptions and info to the POP Forums database.
 			loggerFactory.AddPopForumsLogger(app);
 
